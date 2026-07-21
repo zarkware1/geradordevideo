@@ -14,9 +14,9 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
-const FONTE_HEADLINE = "C\\:/Windows/Fonts/arial.ttf"; // no Linux, trocar pelo caminho da fonte (ver Dockerfile abaixo)
+const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-// ---------- Helpers reaproveitados dos testes ----------
+// ---------- Helpers ----------
 
 function duracaoAudio(p) {
   const saida = execSync(
@@ -167,10 +167,8 @@ async function processarJob(job) {
   try {
     console.log(`Processando job ${job.id}...`);
 
-    // Busca o preset (voz + marca d'água)
     const { data: preset } = await supabase.from("brand_presets").select("*").eq("id", job.preset_id).single();
 
-    // Baixa vídeo original e marca d'água do Storage
     const videoPath = path.join(tmpDir, "original.mp4");
     const { data: videoBlob } = await supabase.storage.from("videos-originais").download(job.video_original_path);
     fs.writeFileSync(videoPath, Buffer.from(await videoBlob.arrayBuffer()));
@@ -179,12 +177,10 @@ async function processarJob(job) {
     const { data: wmBlob } = await supabase.storage.from("marcas-dagua").download(preset.watermark_path);
     fs.writeFileSync(watermarkPath, Buffer.from(await wmBlob.arrayBuffer()));
 
-    // 1. Gemini
     const geminiJson = await analisarVideo(videoPath);
     await supabase.from("video_jobs").update({ status: "narrating", gemini_json: geminiJson }).eq("id", job.id);
     await supabase.from("job_events").insert({ job_id: job.id, etapa: "gemini_ok", payload: geminiJson });
 
-    // 2. Fish Audio por cena
     const audiosPaths = [];
     for (let i = 0; i < geminiJson.cenas.length; i++) {
       const p = path.join(tmpDir, `cena_${i}.mp3`);
@@ -193,7 +189,6 @@ async function processarJob(job) {
     }
     await supabase.from("video_jobs").update({ status: "rendering" }).eq("id", job.id);
 
-    // 3. FFmpeg
     const outPath = path.join(tmpDir, "final.mp4");
     montarVideoFinal({
       videoPath,
@@ -204,7 +199,6 @@ async function processarJob(job) {
       outPath,
     });
 
-    // 4. Upload do resultado
     const finalStoragePath = `${job.id}.mp4`;
     const buffer = fs.readFileSync(outPath);
     await supabase.storage.from("videos-finais").upload(finalStoragePath, buffer, { contentType: "video/mp4", upsert: true });
@@ -220,12 +214,18 @@ async function processarJob(job) {
   }
 }
 
+// ---------- Loop principal (agora com log a cada ciclo) ----------
+
 async function loopPrincipal() {
+  console.log(`[${new Date().toISOString()}] Verificando fila...`);
   const { data: jobs, error } = await supabase.rpc("pegar_proximo_job");
   if (error) {
-    console.error("Erro ao buscar job:", error.message);
+    console.error("Erro ao buscar job:", error.message, error.details, error.hint);
   } else if (jobs && jobs.length > 0) {
+    console.log(`Job encontrado: ${jobs[0].id}`);
     await processarJob(jobs[0]);
+  } else {
+    console.log("Nenhum job pendente.");
   }
   setTimeout(loopPrincipal, 5000);
 }
